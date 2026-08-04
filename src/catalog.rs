@@ -33,6 +33,10 @@ impl Catalog {
         }
     }
 
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     pub fn list(&self, rel: &Path) -> io::Result<Vec<(String, Node)>> {
         let dir = self.root.join(rel);
         let mtime = fs::metadata(&dir)?.modified()?;
