@@ -135,6 +135,7 @@ pub fn build_rar4(
     let mut cmd = Command::new("rar");
     cmd.arg("a")
         .arg(if store { "-m0" } else { "-m1" })
+        .arg("-ep") // store only the file name, not the tmpdir path
         .arg("-idq"); // quiet
     if old_naming {
         cmd.arg("-vn");
