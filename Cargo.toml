@@ -1,0 +1,16 @@
+[package]
+name = "rarfs"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+fuser = "0.15"
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+anyhow = "1"
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+crc32fast = "1"
