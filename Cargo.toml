@@ -2,6 +2,7 @@
 name = "rarfs"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
 fuser = "0.15"
@@ -14,3 +15,6 @@ libc = "0.2"
 [dev-dependencies]
 tempfile = "3"
 crc32fast = "1"
+
+[build-dependencies]
+cc = "1"
