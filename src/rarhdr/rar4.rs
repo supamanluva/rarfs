@@ -107,7 +107,7 @@ fn parse_file(
         method: if method_b == 0x30 {
             Method::Store
         } else {
-            Method::Compressed(method_b - 0x30)
+            Method::Compressed(method_b.saturating_sub(0x30))
         },
         crc32,
         split_before: flags & LHD_SPLIT_BEFORE != 0,
@@ -139,10 +139,16 @@ fn decode_unicode_name(enc: &[u8]) -> String {
         }
         match flags >> 6 {
             0 => {
+                if pos >= enc.len() {
+                    break;
+                }
                 units.push(enc[pos] as u16);
                 pos += 1;
             }
             1 => {
+                if pos >= enc.len() {
+                    break;
+                }
                 units.push((high << 8) | enc[pos] as u16);
                 pos += 1;
             }
