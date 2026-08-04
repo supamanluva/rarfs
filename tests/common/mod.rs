@@ -148,41 +148,14 @@ pub fn build_rar4(
     if !out.status.success() {
         return None;
     }
-    // Collect produced volumes in order. Inlined here so this helper compiles
-    // before Task 4 lands the real grouper (`rarfs::volumes::group_volumes`);
-    // Task 4 may refactor this to reuse it.
-    let mut names: Vec<String> = fs::read_dir(dir)
+    // Collect the names rar produced in the dir, group them into volume
+    // sets, and pick the set whose first volume starts with `base`.
+    let names: Vec<String> = fs::read_dir(dir)
         .unwrap()
-        .filter_map(|e| {
-            let n = e.unwrap().file_name().to_string_lossy().into_owned();
-            if n.starts_with(base) && n != payload_file.file_name().unwrap().to_string_lossy() {
-                Some(n)
-            } else {
-                None
-            }
-        })
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
-    names.sort_by_key(|n| volume_order_key(base, n));
-    Some(names.iter().map(|n| dir.join(n)).collect())
-}
-
-/// Order volumes of one set so the first volume comes first:
-/// old-style `base.rar` then `base.r00`, `base.r01`, …;
-/// new-style `base.part1.rar`, `base.part2.rar`, … sorted numerically.
-fn volume_order_key(base: &str, name: &str) -> (u8, u64) {
-    let rest = &name[base.len()..];
-    if rest == ".rar" {
-        return (0, 0);
-    }
-    if let Some(n) = rest
-        .strip_prefix(".part")
-        .and_then(|s| s.strip_suffix(".rar"))
-        .and_then(|s| s.parse::<u64>().ok())
-    {
-        return (1, n);
-    }
-    if let Some(n) = rest.strip_prefix(".r").and_then(|s| s.parse::<u64>().ok()) {
-        return (2, n);
-    }
-    (3, 0)
+    let set = rarfs::volumes::group_volumes(&names)
+        .into_iter()
+        .find(|s| s[0].starts_with(base))?;
+    Some(set.iter().map(|n| dir.join(n)).collect())
 }
