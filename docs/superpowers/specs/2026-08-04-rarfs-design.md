@@ -29,8 +29,10 @@ playback streams plus background library scans.
 - Every real file passes through untouched, including the `.rar` / `.r00` /
   `.partNN.rar` volume files themselves.
 - Each archive *set* additionally surfaces its archived contents as regular files
-  at the appropriate path (e.g. `Show.S01E01.rar` + `Show.S01E01.r00..r37` also
-  yields `Show.S01E01.mkv` with the correct size).
+  **in the same directory as the set's first volume** (e.g. `Show.S01E01.rar` +
+  `Show.S01E01.r00..r37` in a directory also yields `Show.S01E01.mkv` there, with
+  the correct size). Paths stored inside the archive itself are flattened —
+  only the member's base name is used.
 - Media servers only scan video extensions, so pass-through volumes alongside
   extracted entries do not confuse Plex/Jellyfin.
 - Volume sets are detected by naming convention:
