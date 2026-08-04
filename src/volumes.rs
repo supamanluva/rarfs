@@ -1,44 +1,53 @@
 use std::collections::HashMap;
 
+/// Strip an ASCII suffix case-insensitively; all slicing stays on the
+/// original string, so no index can land inside a multi-byte char.
+fn strip_suffix_ascii_ci<'a>(s: &'a str, suffix: &str) -> Option<&'a str> {
+    let tail = s.get(s.len().checked_sub(suffix.len())?..)?;
+    if tail.eq_ignore_ascii_case(suffix) {
+        Some(&s[..s.len() - suffix.len()])
+    } else {
+        None
+    }
+}
+
 /// Split "name.partNN.rar" (case-insensitive) into (base, number).
 fn parse_part_style(name: &str) -> Option<(String, u64)> {
-    let lower = name.to_lowercase();
-    let stem = lower.strip_suffix(".rar")?;
-    let dot = stem.rfind(".part")?;
-    let digits = &stem[dot + 5..];
+    let stem = strip_suffix_ascii_ci(name, ".rar")?;
+    let (base, tail) = stem.rsplit_once('.')?;
+    let digits = tail.get(4..)?;
+    if !tail[..4].eq_ignore_ascii_case("part") {
+        return None;
+    }
     if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     // Keep original casing of the base for filesystem use.
-    Some((name[..dot].to_string(), digits.parse().ok()?))
+    Some((base.to_string(), digits.parse().ok()?))
 }
 
 /// Split "name.rar" / "name.rNN" / "name.sNN" … into (base, sequence index)
 /// where the plain .rar first volume has index 0, .r00 has index 1, …
 /// letters r..z each cover 100 followers.
 fn parse_old_style(name: &str) -> Option<(String, u64)> {
-    let lower = name.to_lowercase();
-    if lower.strip_suffix(".rar").is_some() {
-        return Some((name[..name.len() - 4].to_string(), 0));
+    if let Some(base) = strip_suffix_ascii_ci(name, ".rar") {
+        return Some((base.to_string(), 0));
     }
-    if lower.len() < 4 {
-        return None;
-    }
-    let (_, ext) = lower.split_at(lower.len() - 4);
-    if !ext.starts_with('.') {
-        return None;
-    }
+    let (base, ext) = name.rsplit_once('.')?;
     let b = ext.as_bytes();
-    let letter = b[1];
+    if b.len() != 3 {
+        return None;
+    }
+    let letter = b[0].to_ascii_lowercase();
     if !(b'r'..=b'z').contains(&letter) {
         return None;
     }
-    if !b[2].is_ascii_digit() || !b[3].is_ascii_digit() {
+    if !b[1].is_ascii_digit() || !b[2].is_ascii_digit() {
         return None;
     }
-    let nn = (b[2] - b'0') as u64 * 10 + (b[3] - b'0') as u64;
+    let nn = (b[1] - b'0') as u64 * 10 + (b[2] - b'0') as u64;
     let idx = (letter - b'r') as u64 * 100 + nn + 1;
-    Some((name[..name.len() - 4].to_string(), idx))
+    Some((base.to_string(), idx))
 }
 
 pub fn is_volume_name(name: &str) -> bool {

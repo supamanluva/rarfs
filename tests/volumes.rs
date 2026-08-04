@@ -61,3 +61,17 @@ fn case_insensitive_extensions() {
     let sets = group_volumes(&names(&["A.RAR", "A.R00"]));
     assert_eq!(sets, vec![names(&["A.RAR", "A.R00"])]);
 }
+
+#[test]
+fn non_ascii_names_do_not_panic() {
+    assert!(!is_volume_name("éé.tx"));
+    assert!(!is_volume_name("abé.cd"));
+    // U+212A (KELVIN SIGN) lowercases to 'k' with a different byte length.
+    assert!(is_volume_name("\u{212A}.part1.rar"));
+}
+
+#[test]
+fn groups_unicode_base_names() {
+    let sets = group_volumes(&names(&["映画.part1.rar", "映画.part2.rar"]));
+    assert_eq!(sets, vec![names(&["映画.part1.rar", "映画.part2.rar"])]);
+}
