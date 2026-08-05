@@ -5,7 +5,7 @@ use std::io;
 use std::os::unix::fs::{FileExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use fuser::{
@@ -30,7 +30,7 @@ pub struct RarFs {
     by_ino: Mutex<HashMap<u64, PathBuf>>,
     by_path: Mutex<HashMap<PathBuf, u64>>,
     next_ino: AtomicU64,
-    handles: Mutex<HashMap<u64, Handle>>,
+    handles: Mutex<HashMap<u64, Arc<Mutex<Handle>>>>,
     next_fh: AtomicU64,
 }
 
@@ -253,7 +253,7 @@ impl Filesystem for RarFs {
             },
         };
         let fh = self.next_fh.fetch_add(1, AtomicOrdering::SeqCst);
-        self.handles.lock().unwrap().insert(fh, handle);
+        self.handles.lock().unwrap().insert(fh, Arc::new(Mutex::new(handle)));
         reply.opened(fh, 0);
     }
 
@@ -268,13 +268,23 @@ impl Filesystem for RarFs {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        let mut handles = self.handles.lock().unwrap();
-        let Some(h) = handles.get_mut(&fh) else {
-            reply.error(libc::EBADF);
-            return;
+        // Clone the Arc and drop the map lock before doing I/O so one slow
+        // or hung decode does not serialize/freeze reads on other files.
+        let h = {
+            let handles = self.handles.lock().unwrap();
+            match handles.get(&fh) {
+                Some(h) => h.clone(),
+                None => {
+                    reply.error(libc::EBADF);
+                    return;
+                }
+            }
         };
+        // Per-handle serialization: MemberReader::read_at takes &mut self
+        // and is not re-entrant.
+        let mut h = h.lock().unwrap();
         let mut buf = vec![0u8; size as usize];
-        let result = match h {
+        let result = match &mut *h {
             Handle::Passthrough(f) => f.read_at(&mut buf, offset as u64),
             Handle::Member(r) => r.read_at(offset as u64, &mut buf),
         };
