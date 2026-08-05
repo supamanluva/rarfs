@@ -26,6 +26,33 @@ fn full_sequential_read_matches_payload() {
 }
 
 #[test]
+fn truncated_volume_yields_eio_not_garbage() {
+    let tmp = tempfile::tempdir().unwrap();
+    let payload: Vec<u8> = (0..60_000u32).map(|i| (i % 229) as u8).collect();
+    let vols = common::build_rar5(tmp.path(), "vid", "vid.mkv", &payload, 3);
+    let m = rarfs::aset::parse_set(&vols).unwrap().into_iter().next().unwrap();
+    // Truncate the last volume by 100 bytes.
+    let last = vols.last().unwrap();
+    let orig_len = std::fs::metadata(last).unwrap().len();
+    let f = std::fs::OpenOptions::new().write(true).open(last).unwrap();
+    f.set_len(orig_len - 100).unwrap();
+    drop(f);
+
+    let mut r = StoreReader::new(m.size, m.segments.clone());
+    // Reads before the truncated region still succeed.
+    let mut buf = vec![0u8; 4096];
+    let n = r.read_at(0, &mut buf).unwrap();
+    assert_eq!(n, 4096);
+    assert_eq!(&buf, &payload[..4096]);
+    // A range covering the truncated tail must fail, not return zero-fill.
+    let mut tail = vec![0u8; 4096];
+    let err = r
+        .read_at(payload.len() as u64 - 4096, &mut tail)
+        .expect_err("read covering truncated region must fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
+}
+
+#[test]
 fn random_offset_reads_match_payload() {
     let tmp = tempfile::tempdir().unwrap();
     let payload: Vec<u8> = (0..100_000u32).map(|i| (i % 223) as u8).collect();

@@ -60,7 +60,17 @@ impl MemberReader for StoreReader {
             let in_seg = cur - base;
             let n = (seg.data_len - in_seg).min((buf.len() - written) as u64) as usize;
             let f = File::open(&seg.volume)?;
-            f.read_at(&mut buf[written..written + n], seg.data_offset + in_seg)?;
+            // A short read here means the volume file is truncated: the
+            // clamping above never requests past the member's declared size,
+            // so any shortfall is missing data, not EOF. Surface it as an
+            // error instead of returning zero-filled garbage.
+            let got = f.read_at(&mut buf[written..written + n], seg.data_offset + in_seg)?;
+            if got < n {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "short read from volume (file truncated?)",
+                ));
+            }
             written += n;
         }
         Ok(written)
