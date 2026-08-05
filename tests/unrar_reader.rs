@@ -95,6 +95,27 @@ fn streaming_larger_than_window_exercises_backpressure() {
 }
 
 #[test]
+fn forward_seek_past_window_frontier_does_not_deadlock() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 12 MiB > 8 MiB window: a first read at 10 MiB requests data the decoder
+    // has not produced yet while the window is already full. Without the
+    // drain-past-frontier logic the producer blocks on the full window and
+    // this read never returns (deadlock).
+    let mib = 1024 * 1024usize;
+    let payload: Vec<u8> = (0..12 * mib as u64).map(|i| (i % 251) as u8).collect();
+    let vol = make_compressed(&tmp, &payload);
+    let mut r = UnrarReader::new(&vol, "payload.bin", payload.len() as u64).unwrap();
+    let mut buf = vec![0u8; 4096];
+    let n = r.read_at(10 * mib as u64, &mut buf).unwrap();
+    assert_eq!(n, 4096);
+    assert_eq!(&buf, &payload[10 * mib..10 * mib + 4096]);
+    // Reads after the seek still work.
+    let n = r.read_at(11 * mib as u64, &mut buf).unwrap();
+    assert_eq!(n, 4096);
+    assert_eq!(&buf, &payload[11 * mib..11 * mib + 4096]);
+}
+
+#[test]
 fn backward_seek_is_correct() {
     let tmp = tempfile::tempdir().unwrap();
     let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 233) as u8).collect();

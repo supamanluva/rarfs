@@ -181,6 +181,17 @@ impl MemberReader for UnrarReader {
             // produced up to `offset` yet. saturating_sub: produced may be
             // behind `offset` (reads ahead of the decoder).
             while !s.done && (s.dropped + s.buf.len() as u64).saturating_sub(offset) < want as u64 {
+                // Forward seek past the frontier of decoded data: everything
+                // buffered so far precedes `offset` and will be discarded by
+                // the skip path below anyway. If we waited for coverage
+                // without draining, the producer would stay blocked on the
+                // full window and coverage could never be reached — a
+                // deadlock. Discard now so the producer can advance.
+                if offset > s.dropped + s.buf.len() as u64 && !s.buf.is_empty() {
+                    s.dropped += s.buf.len() as u64;
+                    s.buf.clear();
+                    cv.notify_all(); // wake producer waiting for room
+                }
                 s = cv.wait(s).unwrap();
             }
             // Drop everything before the requested offset.
