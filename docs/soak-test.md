@@ -8,6 +8,14 @@ playback.
 Prerequisites: release build environment (`source "$HOME/.cargo/env"`),
 `unrar` on PATH, `mpv` or VLC, and `fusermount3` (fuse3 package).
 
+> **unrar version caveat:** the system unrar is 4.20, which **cannot read RAR5
+> archives**. For RAR5 sets you need unrar ≥ 5.x — check `unrar | head -1`; a
+> current Linux binary is available from rarlab.com. This only affects the
+> comparison commands in steps 4, 6, and 8 (`unrar l` / `unrar p` / `unrar t`
+> on RAR5 sets will fail with "unknown format" for reasons unrelated to
+> rarfs). The rarfs binary itself does NOT depend on the system unrar — it
+> parses RAR5 headers with its own parser.
+
 ## 1. Pick a sample subtree
 
 Choose a directory of the real collection — or assemble a scratch copy with
@@ -41,6 +49,7 @@ cargo build --release
 ## 3. Mount
 
 ```bash
+cd ~/rarfs
 mkdir -p /tmp/rarfs-mnt
 ./target/release/rarfs /path/to/sample /tmp/rarfs-mnt --log /tmp/rarfs.log
 ```
@@ -71,6 +80,10 @@ unrar l /path/to/sample/<subdir>/SomeTitle.rar        # or .part01.rar
 - Failure looks like: a set's video is missing from the listing → check the
   log for a `hiding unparseable set` warning naming that set (see step 8).
   A wrong size means a header-parse or segment-map bug — stop and report.
+- RAR5 caveat: with unrar 4.20, `unrar l` fails on RAR5 sets ("unknown
+  format") — that is the tool, not rarfs; see the Prerequisites note. Verify
+  RAR5 listings against the archive's own naming/size expectations instead,
+  or use unrar ≥ 5.x.
 
 ## 5. Playback and scrubbing
 
@@ -87,9 +100,13 @@ mpv /tmp/rarfs-mnt/<path>/BigMovie.mkv
       the file lives in the last volumes.
 - [ ] No visual corruption (macroblocks, smeared frames) after a seek — that
       would indicate the segment map is serving bytes from the wrong offset.
-- Failure looks like: seeks hang or the player reports an I/O error. If the
-  set is intact, that is a `StoreReader` bug; check the log and note the
-  position where it failed.
+- Failure looks like: seeks hang or the player reports an I/O error. **First
+  rule out a genuinely truncated/incomplete set** before blaming rarfs: check
+  the step 8 log for warnings on that set and run `unrar t <first volume>`
+  (unrar ≥ 5.x for RAR5) — a partial download fails reads past the truncated
+  point with EIO by design (same behavior as rar2fs). Only if the set tests
+  intact is this a `StoreReader` bug; then note the position where it failed
+  and report.
 
 ## 6. Concurrent reads + integrity spot-check
 
@@ -100,6 +117,10 @@ then in a third terminal:
 find /tmp/rarfs-mnt -name '*.mkv' -exec md5sum {} \;
 ```
 
+Note: the `md5sum` sweep reads **every** matched file end-to-end through the
+mount — expect it to take a while and to be disk-I/O-bound on a large sample.
+That sustained load is the point of the soak; let it run.
+
 Pick one set and compare against a manual extraction pipe:
 
 ```bash
@@ -108,7 +129,9 @@ md5sum /tmp/rarfs-mnt/<set>/Title.mkv      # from the find output above
 ```
 
 (Use `unrar p -inul <first volume>` for RAR5/part sets too — unrar follows the
-volumes automatically.)
+volumes automatically. RAR5 caveat: this needs unrar ≥ 5.x; with the system
+unrar 4.20 it fails on RAR5 sets for reasons unrelated to rarfs — see the
+Prerequisites note.)
 
 - [ ] Both streams play simultaneously without stuttering.
 - [ ] The two md5 hashes match.
@@ -123,8 +146,12 @@ Skip this step if the media server runs as your own user. Otherwise:
 ```bash
 fusermount3 -u /tmp/rarfs-mnt
 grep -q '^user_allow_other' /etc/fuse.conf || echo 'user_allow_other' | sudo tee -a /etc/fuse.conf
+cd ~/rarfs
 ./target/release/rarfs /path/to/sample /tmp/rarfs-mnt --log /tmp/rarfs.log --allow-other
 ```
+
+As in step 3, the process stays in the foreground — run the checks below from
+another terminal.
 
 - [ ] As the plex/jellyfin user, the mount is readable, e.g.
       `sudo -u plex ls /tmp/rarfs-mnt/`.
