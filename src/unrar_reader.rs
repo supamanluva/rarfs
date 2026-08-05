@@ -156,7 +156,10 @@ impl MemberReader for UnrarReader {
         if offset >= self.size {
             return Ok(0);
         }
+        // Reads larger than WINDOW are served WINDOW bytes at a time; the
+        // only current caller (FUSE read) is kernel-capped well below this.
         let want = ((self.size - offset).min(buf.len() as u64)) as usize;
+        let want = want.min(WINDOW);
         // Clone the Arc so the borrow of `self` ends before the mutable
         // `stop_decoder`/`start_decoder` calls in the restart branch below.
         let shared = self.shared.clone();

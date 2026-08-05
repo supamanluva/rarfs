@@ -53,6 +53,48 @@ fn small_backward_seek_within_window_does_not_corrupt() {
 }
 
 #[test]
+fn backward_seek_before_window_start_restarts_decode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let payload: Vec<u8> = (0..50_000u32).map(|i| (i % 241) as u8).collect();
+    let vol = make_compressed(&tmp, &payload);
+    let mut r = UnrarReader::new(&vol, "payload.bin", payload.len() as u64).unwrap();
+    // Reading at 10_000 drains everything before it: dropped advances to 10_000.
+    let mut buf = vec![0u8; 4096];
+    let n = r.read_at(10_000, &mut buf).unwrap();
+    assert_eq!(n, 4096);
+    assert_eq!(&buf, &payload[10_000..14_096]);
+    // 2_000 < dropped (10_000): data already fell out of the window, so the
+    // decoder must restart from the beginning of the archive.
+    let n = r.read_at(2_000, &mut buf).unwrap();
+    assert_eq!(n, 4096);
+    assert_eq!(&buf, &payload[2_000..6_096]);
+    // Forward reads still work after the restart.
+    let n = r.read_at(20_000, &mut buf).unwrap();
+    assert_eq!(n, 4096);
+    assert_eq!(&buf, &payload[20_000..24_096]);
+}
+
+#[test]
+fn streaming_larger_than_window_exercises_backpressure() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 10 MiB > 8 MiB window: the producer must block when the window is full
+    // and resume as the consumer drains it.
+    let payload: Vec<u8> = (0..10 * 1024 * 1024u64).map(|i| (i % 251) as u8).collect();
+    let vol = make_compressed(&tmp, &payload);
+    let mut r = UnrarReader::new(&vol, "payload.bin", payload.len() as u64).unwrap();
+    let mut got = vec![0u8; payload.len()];
+    let mut off = 0usize;
+    while off < got.len() {
+        let end = (off + 1024 * 1024).min(got.len());
+        let n = r.read_at(off as u64, &mut got[off..end]).unwrap();
+        assert!(n > 0);
+        off += n;
+    }
+    assert_eq!(off, payload.len());
+    assert_eq!(got, payload);
+}
+
+#[test]
 fn backward_seek_is_correct() {
     let tmp = tempfile::tempdir().unwrap();
     let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 233) as u8).collect();
