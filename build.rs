@@ -3,10 +3,11 @@ use std::path::Path;
 fn main() {
     let src = Path::new("vendor/unrarsrc");
     if !src.join("dll.hpp").exists() {
-        // Allows `cargo test` of non-unrar tasks before vendoring; the unrar
-        // tests will fail at link time with a clear message.
-        println!("cargo:warning=vendor/unrarsrc missing — unrar features unavailable");
-        return;
+        panic!(
+            "vendor/unrarsrc is missing. The unrar source is not redistributed in this \
+             repository — fetch it once after cloning with:\n\n    \
+             scripts/fetch-unrarsrc.sh\n"
+        );
     }
     let mut build = cc::Build::new();
     build
