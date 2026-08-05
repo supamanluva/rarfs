@@ -128,10 +128,11 @@ impl RarFs {
     fn member_reader(m: &AssembledMember) -> io::Result<Box<dyn MemberReader>> {
         match m.method {
             Method::Store => Ok(Box::new(StoreReader::new(m.size, m.segments.clone()))),
-            Method::Compressed(_) => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                "compressed members not supported yet (Task 10)",
-            )),
+            Method::Compressed(_) => Ok(Box::new(crate::unrar_reader::UnrarReader::new(
+                &m.segments[0].volume,
+                &m.name,
+                m.size,
+            )?)),
         }
     }
 }

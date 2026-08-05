@@ -5,3 +5,4 @@ pub mod reader;
 pub mod catalog;
 pub mod fs;
 pub mod unrar_ffi;
+pub mod unrar_reader;
