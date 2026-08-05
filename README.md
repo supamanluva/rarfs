@@ -43,19 +43,24 @@ names, and files larger than 4 GB.
 
 ## Requirements
 
-- Linux with FUSE 3 (`libfuse3-dev` on Debian/Ubuntu)
-- Rust toolchain (stable, via [rustup](https://rustup.rs)) and a C++ compiler
-- rarlab's unrar source — **not redistributed here** (license); the build
-  script fetches it (see below)
-- For running the test suite: a `rar` binary (RAR4 fixtures; any version works,
-  RAR5 fixtures are generated in code)
+Everything below is for Debian/Ubuntu; on other distros install the
+equivalents.
+
+| Need | Package / where to get it |
+| --- | --- |
+| FUSE 3 runtime + headers | `sudo apt-get install -y fuse3 libfuse3-dev` |
+| Rust toolchain (stable) | `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \| sh -s -- -y` (see [rustup.rs](https://rustup.rs)) |
+| C++ compiler (builds unrar) | `sudo apt-get install -y g++` |
+| rarlab unrar source | fetched by `scripts/fetch-unrarsrc.sh` (not redistributed here for license reasons) |
+| `rar` binary | only for the test suite's RAR4 fixtures; not needed to build or run |
 
 ## Build
 
 ```bash
 git clone https://github.com/supamanluva/rarfs.git
 cd rarfs
-scripts/fetch-unrarsrc.sh      # vendors unrar source into vendor/unrarsrc
+scripts/fetch-unrarsrc.sh      # downloads unrar source into vendor/unrarsrc
+source "$HOME/.cargo/env"      # fresh rustup installs only
 cargo build --release
 # binary: target/release/rarfs
 ```
@@ -63,7 +68,9 @@ cargo build --release
 ## Usage
 
 ```bash
-rarfs <SOURCE_DIR> <MOUNTPOINT> [--log FILE] [--allow-other]
+mkdir -p /mnt/rarfs            # mount point must exist and be empty
+target/release/rarfs <SOURCE_DIR> /mnt/rarfs [--log FILE] [--allow-other]
+# unmount: fusermount3 -u /mnt/rarfs
 ```
 
 - The mount mirrors the source tree read-only. Real files (including the
@@ -80,6 +87,7 @@ The media server usually runs as a different user, so mount with
 
 ```bash
 grep -q '^user_allow_other' /etc/fuse.conf || echo 'user_allow_other' | sudo tee -a /etc/fuse.conf
+sudo mkdir -p /mnt/plex
 rarfs /media/movies /mnt/plex --allow-other --log /var/log/rarfs.log
 ```
 
