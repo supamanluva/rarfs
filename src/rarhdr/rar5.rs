@@ -14,6 +14,11 @@ const HFL_SPLIT_AFTER: u64 = 0x0010;
 const T_FILE: u64 = 2;
 const T_ENDARC: u64 = 5;
 
+// HEAD_SIZE is an unbounded vint from untrusted input; real RAR5 headers
+// are kilobytes at most. Cap it before allocating to avoid OOM on hostile
+// archives.
+const MAX_HEAD_SIZE: u64 = 16 * 1024 * 1024;
+
 pub fn parse_volume(path: &Path) -> io::Result<Vec<MemberHeader>> {
     let mut f = BufReader::new(File::open(path)?);
     let mut sig = [0u8; 8];
@@ -44,6 +49,9 @@ pub fn parse_volume(path: &Path) -> io::Result<Vec<MemberHeader>> {
                 return Err(bad("oversized vint"));
             }
         };
+        if head_size > MAX_HEAD_SIZE {
+            return Err(bad("oversized header"));
+        }
         let mut hdr = vec![0u8; head_size as usize];
         f.read_exact(&mut hdr)?;
         let (btype, n1) = read_vint(&hdr).ok_or(bad("bad block type"))?;
@@ -86,6 +94,9 @@ fn parse_file(
     let (_attr, k) = read_vint(&body[o..]).ok_or(bad("bad attr"))?;
     o += k;
     if fflags & 0x0002 != 0 {
+        // Bounds-check like the crc read below: a truncated body would
+        // otherwise make the next `body[o..]` indexing panic.
+        body.get(o..o + 4).ok_or(bad("bad mtime"))?;
         o += 4; // mtime
     }
     let mut crc32 = 0u32;

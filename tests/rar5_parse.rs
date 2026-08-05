@@ -43,3 +43,34 @@ fn parses_multivolume_split_flags() {
     }
     assert_eq!(joined, payload);
 }
+
+#[test]
+fn truncated_mtime_field_returns_err_not_panic() {
+    let tmp = tempfile::tempdir().unwrap();
+    // File header whose FILE_FLAGS set the mtime-present bit (0x0002) but
+    // whose body ends right after ATTR — the 4-byte mtime field is missing.
+    let mut body = Vec::new();
+    common::push_vint(&mut body, 0x0002); // FILE_FLAGS: mtime present
+    common::push_vint(&mut body, 1234); // unp size
+    common::push_vint(&mut body, 0o100644); // ATTR — body truncated here
+    let mut vol = b"Rar!\x1a\x07\x01\x00".to_vec();
+    vol.extend_from_slice(&common::main_hdr5(false, None));
+    vol.extend_from_slice(&common::block5(2, 0, &[], &body, &[]));
+    let p = tmp.path().join("bad.rar");
+    std::fs::write(&p, &vol).unwrap();
+    assert!(rarfs::rarhdr::rar5::parse_volume(&p).is_err());
+}
+
+#[test]
+fn oversized_head_size_returns_err_not_oom() {
+    let tmp = tempfile::tempdir().unwrap();
+    // A block advertising a ~4 GiB HEAD_SIZE must be rejected before any
+    // allocation is attempted.
+    let mut vol = b"Rar!\x1a\x07\x01\x00".to_vec();
+    vol.extend_from_slice(&common::main_hdr5(false, None));
+    vol.extend_from_slice(&[0, 0, 0, 0]); // HEAD_CRC (not validated)
+    common::push_vint(&mut vol, 0xFFFF_FFFF); // HEAD_SIZE
+    let p = tmp.path().join("huge.rar");
+    std::fs::write(&p, &vol).unwrap();
+    assert!(rarfs::rarhdr::rar5::parse_volume(&p).is_err());
+}
