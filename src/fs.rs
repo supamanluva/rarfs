@@ -25,7 +25,16 @@ enum Handle {
     Member(Box<dyn MemberReader>),
 }
 
-pub struct RarFs {
+// All FUSE callbacks below hand off to a freshly spawned thread and return
+// immediately. Catalog lookups can block for seconds (rescanning a directory
+// means re-parsing every RAR set in it, over what may be a network mount),
+// and fuser dispatches requests one at a time on a single thread — without
+// this, a slow lookup for one file stalls reads for every other file on the
+// mount, including ones already mid-playback. fuser's Reply types are
+// designed to be moved to another thread and completed asynchronously (see
+// the module doc in the `fuser` crate's reply.rs), so this is the supported
+// way to get concurrency out of it.
+struct Shared {
     catalog: Catalog,
     by_ino: Mutex<HashMap<u64, PathBuf>>,
     by_path: Mutex<HashMap<PathBuf, u64>>,
@@ -34,22 +43,7 @@ pub struct RarFs {
     next_fh: AtomicU64,
 }
 
-impl RarFs {
-    pub fn new(root: PathBuf) -> RarFs {
-        let mut by_ino = HashMap::new();
-        let mut by_path = HashMap::new();
-        by_ino.insert(1u64, PathBuf::new());
-        by_path.insert(PathBuf::new(), 1u64);
-        RarFs {
-            catalog: Catalog::new(root),
-            by_ino: Mutex::new(by_ino),
-            by_path: Mutex::new(by_path),
-            next_ino: AtomicU64::new(2),
-            handles: Mutex::new(HashMap::new()),
-            next_fh: AtomicU64::new(1),
-        }
-    }
-
+impl Shared {
     fn ino_for(&self, rel: &Path) -> u64 {
         if let Some(&ino) = self.by_path.lock().unwrap().get(rel) {
             return ino;
@@ -64,7 +58,7 @@ impl RarFs {
         self.by_ino.lock().unwrap().get(&ino).cloned()
     }
 
-    fn attr_for(&self, ino: u64, node: &Node) -> io::Result<FileAttr> {
+    fn attr_for(ino: u64, node: &Node) -> io::Result<FileAttr> {
         let now = SystemTime::now();
         let attr = match node {
             Node::Dir => FileAttr {
@@ -135,41 +129,71 @@ impl RarFs {
             )?)),
         }
     }
+
+    fn catalog_root(&self) -> PathBuf {
+        self.catalog.root().to_path_buf()
+    }
+}
+
+pub struct RarFs(Arc<Shared>);
+
+impl RarFs {
+    pub fn new(root: PathBuf) -> RarFs {
+        let mut by_ino = HashMap::new();
+        let mut by_path = HashMap::new();
+        by_ino.insert(1u64, PathBuf::new());
+        by_path.insert(PathBuf::new(), 1u64);
+        RarFs(Arc::new(Shared {
+            catalog: Catalog::new(root),
+            by_ino: Mutex::new(by_ino),
+            by_path: Mutex::new(by_path),
+            next_ino: AtomicU64::new(2),
+            handles: Mutex::new(HashMap::new()),
+            next_fh: AtomicU64::new(1),
+        }))
+    }
 }
 
 impl Filesystem for RarFs {
     fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
-        let Some(parent_path) = self.path_for(parent) else {
-            reply.error(libc::ENOENT);
-            return;
-        };
-        let rel = parent_path.join(name);
-        match self.catalog.lookup(&rel) {
-            Ok(Some(node)) => {
-                let ino = self.ino_for(&rel);
-                match self.attr_for(ino, &node) {
-                    Ok(attr) => reply.entry(&TTL, &attr, 0),
-                    Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
+        let shared = Arc::clone(&self.0);
+        let name = name.to_os_string();
+        std::thread::spawn(move || {
+            let Some(parent_path) = shared.path_for(parent) else {
+                reply.error(libc::ENOENT);
+                return;
+            };
+            let rel = parent_path.join(&name);
+            match shared.catalog.lookup(&rel) {
+                Ok(Some(node)) => {
+                    let ino = shared.ino_for(&rel);
+                    match Shared::attr_for(ino, &node) {
+                        Ok(attr) => reply.entry(&TTL, &attr, 0),
+                        Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
+                    }
                 }
+                Ok(None) => reply.error(libc::ENOENT),
+                Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
             }
-            Ok(None) => reply.error(libc::ENOENT),
-            Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
-        }
+        });
     }
 
     fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
-        let Some(rel) = self.path_for(ino) else {
-            reply.error(libc::ENOENT);
-            return;
-        };
-        match self.catalog.lookup(&rel) {
-            Ok(Some(node)) => match self.attr_for(ino, &node) {
-                Ok(attr) => reply.attr(&TTL, &attr),
+        let shared = Arc::clone(&self.0);
+        std::thread::spawn(move || {
+            let Some(rel) = shared.path_for(ino) else {
+                reply.error(libc::ENOENT);
+                return;
+            };
+            match shared.catalog.lookup(&rel) {
+                Ok(Some(node)) => match Shared::attr_for(ino, &node) {
+                    Ok(attr) => reply.attr(&TTL, &attr),
+                    Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
+                },
+                Ok(None) => reply.error(libc::ENOENT),
                 Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
-            },
-            Ok(None) => reply.error(libc::ENOENT),
-            Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
-        }
+            }
+        });
     }
 
     fn readdir(
@@ -180,36 +204,39 @@ impl Filesystem for RarFs {
         offset: i64,
         mut reply: ReplyDirectory,
     ) {
-        let Some(rel) = self.path_for(ino) else {
-            reply.error(libc::ENOENT);
-            return;
-        };
-        let entries = match self.catalog.list(&rel) {
-            Ok(e) => e,
-            Err(e) => {
-                reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+        let shared = Arc::clone(&self.0);
+        std::thread::spawn(move || {
+            let Some(rel) = shared.path_for(ino) else {
+                reply.error(libc::ENOENT);
                 return;
-            }
-        };
-        let mut items: Vec<(u64, FileType, String)> = vec![
-            (ino, FileType::Directory, ".".into()),
-            (1, FileType::Directory, "..".into()),
-        ];
-        for (name, node) in entries {
-            let child_rel = rel.join(&name);
-            let child_ino = self.ino_for(&child_rel);
-            let kind = match node {
-                Node::Dir => FileType::Directory,
-                _ => FileType::RegularFile,
             };
-            items.push((child_ino, kind, name));
-        }
-        for (i, (child_ino, kind, name)) in items.into_iter().enumerate().skip(offset as usize) {
-            if reply.add(child_ino, (i + 1) as i64, kind, name) {
-                break;
+            let entries = match shared.catalog.list(&rel) {
+                Ok(e) => e,
+                Err(e) => {
+                    reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+                    return;
+                }
+            };
+            let mut items: Vec<(u64, FileType, String)> = vec![
+                (ino, FileType::Directory, ".".into()),
+                (1, FileType::Directory, "..".into()),
+            ];
+            for (name, node) in entries {
+                let child_rel = rel.join(&name);
+                let child_ino = shared.ino_for(&child_rel);
+                let kind = match node {
+                    Node::Dir => FileType::Directory,
+                    _ => FileType::RegularFile,
+                };
+                items.push((child_ino, kind, name));
             }
-        }
-        reply.ok();
+            for (i, (child_ino, kind, name)) in items.into_iter().enumerate().skip(offset as usize) {
+                if reply.add(child_ino, (i + 1) as i64, kind, name) {
+                    break;
+                }
+            }
+            reply.ok();
+        });
     }
 
     fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
@@ -217,44 +244,47 @@ impl Filesystem for RarFs {
             reply.error(libc::EROFS);
             return;
         }
-        let Some(rel) = self.path_for(ino) else {
-            reply.error(libc::ENOENT);
-            return;
-        };
-        let node = match self.catalog.lookup(&rel) {
-            Ok(Some(n)) => n,
-            Ok(None) => {
+        let shared = Arc::clone(&self.0);
+        std::thread::spawn(move || {
+            let Some(rel) = shared.path_for(ino) else {
                 reply.error(libc::ENOENT);
                 return;
-            }
-            Err(e) => {
-                reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-                return;
-            }
-        };
-        let handle = match node {
-            Node::Dir => {
-                reply.error(libc::EISDIR);
-                return;
-            }
-            Node::Passthrough(p) => match File::open(&p) {
-                Ok(f) => Handle::Passthrough(f),
+            };
+            let node = match shared.catalog.lookup(&rel) {
+                Ok(Some(n)) => n,
+                Ok(None) => {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
                 Err(e) => {
                     reply.error(e.raw_os_error().unwrap_or(libc::EIO));
                     return;
                 }
-            },
-            Node::Member(m) => match Self::member_reader(&m) {
-                Ok(r) => Handle::Member(r),
-                Err(e) => {
-                    reply.error(e.raw_os_error().unwrap_or(libc::ENOSYS));
+            };
+            let handle = match node {
+                Node::Dir => {
+                    reply.error(libc::EISDIR);
                     return;
                 }
-            },
-        };
-        let fh = self.next_fh.fetch_add(1, AtomicOrdering::SeqCst);
-        self.handles.lock().unwrap().insert(fh, Arc::new(Mutex::new(handle)));
-        reply.opened(fh, 0);
+                Node::Passthrough(p) => match File::open(&p) {
+                    Ok(f) => Handle::Passthrough(f),
+                    Err(e) => {
+                        reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+                        return;
+                    }
+                },
+                Node::Member(m) => match Shared::member_reader(&m) {
+                    Ok(r) => Handle::Member(r),
+                    Err(e) => {
+                        reply.error(e.raw_os_error().unwrap_or(libc::ENOSYS));
+                        return;
+                    }
+                },
+            };
+            let fh = shared.next_fh.fetch_add(1, AtomicOrdering::SeqCst);
+            shared.handles.lock().unwrap().insert(fh, Arc::new(Mutex::new(handle)));
+            reply.opened(fh, 0);
+        });
     }
 
     fn read(
@@ -268,30 +298,33 @@ impl Filesystem for RarFs {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        // Clone the Arc and drop the map lock before doing I/O so one slow
-        // or hung decode does not serialize/freeze reads on other files.
-        let h = {
-            let handles = self.handles.lock().unwrap();
-            match handles.get(&fh) {
-                Some(h) => h.clone(),
-                None => {
-                    reply.error(libc::EBADF);
-                    return;
+        let shared = Arc::clone(&self.0);
+        std::thread::spawn(move || {
+            // Clone the Arc and drop the map lock before doing I/O so one slow
+            // or hung decode does not serialize/freeze reads on other files.
+            let h = {
+                let handles = shared.handles.lock().unwrap();
+                match handles.get(&fh) {
+                    Some(h) => h.clone(),
+                    None => {
+                        reply.error(libc::EBADF);
+                        return;
+                    }
                 }
+            };
+            // Per-handle serialization: MemberReader::read_at takes &mut self
+            // and is not re-entrant.
+            let mut h = h.lock().unwrap();
+            let mut buf = vec![0u8; size as usize];
+            let result = match &mut *h {
+                Handle::Passthrough(f) => f.read_at(&mut buf, offset as u64),
+                Handle::Member(r) => r.read_at(offset as u64, &mut buf),
+            };
+            match result {
+                Ok(n) => reply.data(&buf[..n]),
+                Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
             }
-        };
-        // Per-handle serialization: MemberReader::read_at takes &mut self
-        // and is not re-entrant.
-        let mut h = h.lock().unwrap();
-        let mut buf = vec![0u8; size as usize];
-        let result = match &mut *h {
-            Handle::Passthrough(f) => f.read_at(&mut buf, offset as u64),
-            Handle::Member(r) => r.read_at(offset as u64, &mut buf),
-        };
-        match result {
-            Ok(n) => reply.data(&buf[..n]),
-            Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
-        }
+        });
     }
 
     fn release(
@@ -304,33 +337,30 @@ impl Filesystem for RarFs {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        self.handles.lock().unwrap().remove(&fh);
+        self.0.handles.lock().unwrap().remove(&fh);
         reply.ok();
     }
 
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
-        let root = self.catalog_root();
-        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
-        let c = std::ffi::CString::new(root.as_os_str().as_encoded_bytes()).unwrap();
-        if unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0 {
-            reply.statfs(
-                st.f_blocks,
-                st.f_bfree,
-                st.f_bavail,
-                st.f_files,
-                st.f_ffree,
-                st.f_bsize as u32,
-                st.f_namemax as u32,
-                st.f_frsize as u32,
-            );
-        } else {
-            reply.error(libc::EIO);
-        }
-    }
-}
-
-impl RarFs {
-    fn catalog_root(&self) -> PathBuf {
-        self.catalog.root().to_path_buf()
+        let shared = Arc::clone(&self.0);
+        std::thread::spawn(move || {
+            let root = shared.catalog_root();
+            let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+            let c = std::ffi::CString::new(root.as_os_str().as_encoded_bytes()).unwrap();
+            if unsafe { libc::statvfs(c.as_ptr(), &mut st) } == 0 {
+                reply.statfs(
+                    st.f_blocks,
+                    st.f_bfree,
+                    st.f_bavail,
+                    st.f_files,
+                    st.f_ffree,
+                    st.f_bsize as u32,
+                    st.f_namemax as u32,
+                    st.f_frsize as u32,
+                );
+            } else {
+                reply.error(libc::EIO);
+            }
+        });
     }
 }
