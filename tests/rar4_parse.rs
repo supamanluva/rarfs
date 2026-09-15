@@ -21,6 +21,10 @@ fn parses_single_volume_store_member() {
     assert_eq!(m.name, "payload.bin");
     assert_eq!(m.unpacked_size, pl.len() as u64);
     assert_eq!(m.method, rarfs::rarhdr::Method::Store);
+    // rar always writes FTIME; it must land within a day of the fixture build.
+    let mtime = m.mtime.expect("rar4 header should carry mtime");
+    let age = mtime.elapsed().unwrap_or_default();
+    assert!(age < std::time::Duration::from_secs(24 * 3600), "mtime too far in the past: {mtime:?}");
     assert!(!m.split_before && !m.split_after);
     let bytes = std::fs::read(&vols[0]).unwrap();
     let s = &m.segment;

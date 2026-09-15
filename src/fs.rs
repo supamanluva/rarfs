@@ -58,43 +58,59 @@ impl Shared {
         self.by_ino.lock().unwrap().get(&ino).cloned()
     }
 
-    fn attr_for(ino: u64, node: &Node) -> io::Result<FileAttr> {
+    fn attr_for(&self, rel: &Path, ino: u64, node: &Node) -> io::Result<FileAttr> {
         let now = SystemTime::now();
         let attr = match node {
-            Node::Dir => FileAttr {
-                ino,
-                size: 0,
-                blocks: 0,
-                atime: now,
-                mtime: now,
-                ctime: now,
-                crtime: now,
-                kind: FileType::Directory,
-                perm: 0o555,
-                nlink: 2,
-                uid: unsafe { libc::getuid() },
-                gid: unsafe { libc::getgid() },
-                rdev: 0,
-                blksize: 4096,
-                flags: 0,
-            },
-            Node::Member(m) => FileAttr {
-                ino,
-                size: m.size,
-                blocks: m.size.div_ceil(512),
-                atime: now,
-                mtime: now,
-                ctime: now,
-                crtime: now,
-                kind: FileType::RegularFile,
-                perm: 0o444,
-                nlink: 1,
-                uid: unsafe { libc::getuid() },
-                gid: unsafe { libc::getgid() },
-                rdev: 0,
-                blksize: 4096,
-                flags: 0,
-            },
+            Node::Dir => {
+                // Mirror the backing directory's mtime. Reporting `now` here
+                // makes every stat look like a fresh change, which sends
+                // watchers (Plex checkFiles) into endless rescans.
+                let t = std::fs::metadata(self.catalog.root().join(rel))
+                    .and_then(|md| md.modified())
+                    .unwrap_or(now);
+                FileAttr {
+                    ino,
+                    size: 0,
+                    blocks: 0,
+                    atime: t,
+                    mtime: t,
+                    ctime: t,
+                    crtime: now,
+                    kind: FileType::Directory,
+                    perm: 0o555,
+                    nlink: 2,
+                    uid: unsafe { libc::getuid() },
+                    gid: unsafe { libc::getgid() },
+                    rdev: 0,
+                    blksize: 4096,
+                    flags: 0,
+                }
+            }
+            Node::Member(m) => {
+                // Prefer the timestamp stored in the archive header; fall back
+                // to the first volume's mtime (stable, close to release date).
+                let t = m
+                    .mtime
+                    .or_else(|| std::fs::metadata(&m.segments[0].volume).and_then(|md| md.modified()).ok())
+                    .unwrap_or(now);
+                FileAttr {
+                    ino,
+                    size: m.size,
+                    blocks: m.size.div_ceil(512),
+                    atime: t,
+                    mtime: t,
+                    ctime: t,
+                    crtime: now,
+                    kind: FileType::RegularFile,
+                    perm: 0o444,
+                    nlink: 1,
+                    uid: unsafe { libc::getuid() },
+                    gid: unsafe { libc::getgid() },
+                    rdev: 0,
+                    blksize: 4096,
+                    flags: 0,
+                }
+            }
             Node::Passthrough(p) => {
                 let md = std::fs::metadata(p)?;
                 FileAttr {
@@ -167,7 +183,7 @@ impl Filesystem for RarFs {
             match shared.catalog.lookup(&rel) {
                 Ok(Some(node)) => {
                     let ino = shared.ino_for(&rel);
-                    match Shared::attr_for(ino, &node) {
+                    match shared.attr_for(&rel, ino, &node) {
                         Ok(attr) => reply.entry(&TTL, &attr, 0),
                         Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
                     }
@@ -186,7 +202,7 @@ impl Filesystem for RarFs {
                 return;
             };
             match shared.catalog.lookup(&rel) {
-                Ok(Some(node)) => match Shared::attr_for(ino, &node) {
+                Ok(Some(node)) => match shared.attr_for(&rel, ino, &node) {
                     Ok(attr) => reply.attr(&TTL, &attr),
                     Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
                 },

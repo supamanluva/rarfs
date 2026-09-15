@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, Read};
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 use crate::rarhdr::{bad, rar4, rar5, Method, Segment};
 
@@ -10,6 +11,7 @@ pub struct AssembledMember {
     pub size: u64,
     pub method: Method,
     pub crc32: u32,
+    pub mtime: Option<SystemTime>,
     pub segments: Vec<Segment>,
 }
 
@@ -55,6 +57,7 @@ pub fn parse_set(volumes: &[PathBuf]) -> io::Result<Vec<AssembledMember>> {
                         size: h.unpacked_size,
                         method: h.method,
                         crc32: h.crc32,
+                        mtime: h.mtime,
                         segments: vec![h.segment.clone()],
                     },
                     wants_more: h.split_after,

@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek};
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use super::{bad, read_vint, MemberHeader, Method, Segment};
 
@@ -93,11 +94,13 @@ fn parse_file(
     let mut o = n1 + n2;
     let (_attr, k) = read_vint(&body[o..]).ok_or(bad("bad attr"))?;
     o += k;
+    let mut mtime = None;
     if fflags & 0x0002 != 0 {
         // Bounds-check like the crc read below: a truncated body would
         // otherwise make the next `body[o..]` indexing panic.
-        body.get(o..o + 4).ok_or(bad("bad mtime"))?;
-        o += 4; // mtime
+        let b = body.get(o..o + 4).ok_or(bad("bad mtime"))?;
+        mtime = Some(SystemTime::UNIX_EPOCH + Duration::from_secs(u32::from_le_bytes(b.try_into().unwrap()) as u64));
+        o += 4;
     }
     let mut crc32 = 0u32;
     if fflags & 0x0004 != 0 {
@@ -122,6 +125,7 @@ fn parse_file(
         unpacked_size: unp,
         method: if m == 0 { Method::Store } else { Method::Compressed(m as u8) },
         crc32,
+        mtime,
         split_before: hflags & HFL_SPLIT_BEFORE != 0,
         split_after: hflags & HFL_SPLIT_AFTER != 0,
         segment: Segment {

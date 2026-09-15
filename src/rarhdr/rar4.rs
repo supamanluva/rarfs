@@ -1,6 +1,7 @@
 use std::fs::File;
 use std::io::{self, BufReader, Read, Seek};
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use super::{bad, MemberHeader, Method, Segment};
 
@@ -74,6 +75,7 @@ fn parse_file(
     }
     let unp_lo = u32::from_le_bytes(body[0..4].try_into().unwrap()) as u64;
     let crc32 = u32::from_le_bytes(body[5..9].try_into().unwrap());
+    let ftime = u32::from_le_bytes(body[9..13].try_into().unwrap());
     let method_b = body[14];
     let name_size = u16::from_le_bytes([body[15], body[16]]) as usize;
     let mut o = 21usize;
@@ -110,6 +112,7 @@ fn parse_file(
             Method::Compressed(method_b.saturating_sub(0x30))
         },
         crc32,
+        mtime: dos_time_to_system(ftime),
         split_before: flags & LHD_SPLIT_BEFORE != 0,
         split_after: flags & LHD_SPLIT_AFTER != 0,
         segment: Segment {
@@ -118,6 +121,30 @@ fn parse_file(
             data_len: pack,
         },
     }))
+}
+
+/// RAR4 file times are MS-DOS packed local datetimes
+/// (year-1980<<25 | month<<21 | day<<16 | hour<<11 | min<<5 | sec/2), same as
+/// unrar's RarTime::SetDos. Converted via mktime, so the result follows the
+/// machine's local timezone exactly like unrar's display does.
+fn dos_time_to_system(dos: u32) -> Option<SystemTime> {
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    tm.tm_year = 80 + (dos >> 25) as i32;
+    tm.tm_mon = ((dos >> 21) & 0x0f) as i32 - 1;
+    tm.tm_mday = ((dos >> 16) & 0x1f) as i32;
+    tm.tm_hour = ((dos >> 11) & 0x1f) as i32;
+    tm.tm_min = ((dos >> 5) & 0x3f) as i32;
+    tm.tm_sec = ((dos & 0x1f) * 2) as i32;
+    tm.tm_isdst = -1;
+    if tm.tm_mon < 0 || tm.tm_mday < 1 {
+        return None;
+    }
+    let t = unsafe { libc::mktime(&mut tm) };
+    if t <= 0 {
+        None
+    } else {
+        Some(SystemTime::UNIX_EPOCH + Duration::from_secs(t as u64))
+    }
 }
 
 /// RAR4 LHD_UNICODE name decoding (same algorithm as unrar's

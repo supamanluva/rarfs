@@ -12,6 +12,7 @@ fn parses_single_volume_store_member() {
     assert_eq!(m.name, "movie.mkv");
     assert_eq!(m.unpacked_size, payload.len() as u64);
     assert_eq!(m.method, rarfs::rarhdr::Method::Store);
+    assert_eq!(m.mtime, None); // fixture headers carry no mtime field
     assert!(!m.split_before && !m.split_after);
     assert_eq!(m.segment.volume, vols[0]);
     assert_eq!(m.segment.data_len, payload.len() as u64);
@@ -42,6 +43,33 @@ fn parses_multivolume_split_flags() {
         joined.extend_from_slice(&v[s.data_offset as usize..(s.data_offset + s.data_len) as usize]);
     }
     assert_eq!(joined, payload);
+}
+
+#[test]
+fn parses_mtime_when_present() {
+    let tmp = tempfile::tempdir().unwrap();
+    let payload: Vec<u8> = (0..1_000u32).map(|i| (i % 251) as u8).collect();
+    let mut body = Vec::new();
+    common::push_vint(&mut body, 0x0002 | 0x0004); // FILE_FLAGS: mtime + crc32 present
+    common::push_vint(&mut body, payload.len() as u64); // unp size
+    common::push_vint(&mut body, 0o100644); // ATTR
+    body.extend_from_slice(&1_700_000_000u32.to_le_bytes()); // mtime (unix seconds)
+    body.extend_from_slice(&0x12345678u32.to_le_bytes()); // crc32
+    common::push_vint(&mut body, 0); // COMP_INFO: store
+    common::push_vint(&mut body, 1); // HOST_OS: unix
+    common::push_vint(&mut body, 4); // name len
+    body.extend_from_slice(b"a.mkv");
+    let mut vol = b"Rar!\x1a\x07\x01\x00".to_vec();
+    vol.extend_from_slice(&common::main_hdr5(false, None));
+    vol.extend_from_slice(&common::block5(2, 0, &[], &body, &payload));
+    vol.extend_from_slice(&common::endarc5());
+    let p = tmp.path().join("m.rar");
+    std::fs::write(&p, &vol).unwrap();
+
+    let members = rarfs::rarhdr::rar5::parse_volume(&p).unwrap();
+    assert_eq!(members.len(), 1);
+    let expect = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+    assert_eq!(members[0].mtime, Some(expect));
 }
 
 #[test]

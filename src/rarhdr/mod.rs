@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::SystemTime;
 
 pub mod rar4;
 pub mod rar5;
@@ -24,6 +25,7 @@ pub struct MemberHeader {
     pub unpacked_size: u64,
     pub method: Method,
     pub crc32: u32,
+    pub mtime: Option<SystemTime>,
     pub split_before: bool,
     pub split_after: bool,
     pub segment: Segment,
